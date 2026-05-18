@@ -32,24 +32,64 @@ The CLI auto-detects Chrome, Chromium, Brave, Edge, and Vivaldi on macOS, Linux,
 
 ## Usage
 
+### Page inspection
+
 ```bash
 scripts/cdp.mjs list                              # list open tabs
-scripts/cdp.mjs shot   <target>                   # screenshot → runtime dir
+scripts/cdp.mjs shot   <target> [file] [--full]   # screenshot (viewport, or --full for entire scrollable page)
 scripts/cdp.mjs snap   <target>                   # accessibility tree (compact, semantic)
 scripts/cdp.mjs html   <target> [".selector"]     # full HTML or scoped to CSS selector
 scripts/cdp.mjs eval   <target> "expression"      # evaluate JS in page context
+```
+
+### Buffered capture (console + network)
+
+```bash
+scripts/cdp.mjs console <target> [flags]          # buffered console / exception / log entries
+scripts/cdp.mjs console <target> clear            # reset the console buffer
+
+scripts/cdp.mjs netcapture <target> [flags]       # buffered HTTP request/response history
+scripts/cdp.mjs netcapture <target> body    <reqId> [--head N] [--save <path>]  # fetch response body
+scripts/cdp.mjs netcapture <target> reqbody <reqId> [--head N] [--save <path>]  # fetch request body
+scripts/cdp.mjs netcapture <target> clear         # reset the netcapture buffer
+```
+
+Both buffers fill in real time once a tab's daemon is attached (first contact spawns it). Shared flags: `--last N`, `--all`, `--since <iso|5m|1h>`, `--json`. Per-command filters: `console --level error,warn`, `netcapture --status 4xx,5xx --method POST --mime json --url-contains "/api/" --url-regex "^https://api\\."`. Both honor `--frame top|oopif|<url>` since the daemon auto-attaches to cross-origin iframes. `netcapture` rows that carry a request body are marked with a `Q` flag in the METHOD column.
+
+### Frontend helpers
+
+```bash
+scripts/cdp.mjs storage <target> [--only local,session,cookies,indexeddb] [--json]
+                                                  # localStorage / sessionStorage / cookies / IndexedDB names
+
+scripts/cdp.mjs waitfor  <target> "selector" [--timeout 10s] [--visible]
+                                                  # block until selector matches (and is visible)
+scripts/cdp.mjs waitgone <target> "selector" [--timeout 10s]
+                                                  # block until selector clears
+```
+
+### Interaction
+
+```bash
 scripts/cdp.mjs nav    <target> https://...       # navigate and wait for load
-scripts/cdp.mjs net    <target>                   # network resource timing
 scripts/cdp.mjs click  <target> "selector"        # click element by CSS selector
 scripts/cdp.mjs clickxy <target> <x> <y>          # click at CSS pixel coordinates
 scripts/cdp.mjs type   <target> "text"            # type at focused element (works in cross-origin iframes)
 scripts/cdp.mjs loadall <target> "selector"       # click "load more" until gone
-scripts/cdp.mjs evalraw <target> <method> [json]  # raw CDP command passthrough
-scripts/cdp.mjs open   [url]                      # open new tab (triggers Allow prompt)
-scripts/cdp.mjs stop   [target]                   # stop daemon(s)
 ```
 
-`<target>` is a unique prefix of the targetId shown by `list`.
+### Miscellaneous
+
+```bash
+scripts/cdp.mjs net     <target>                  # lightweight page-side resource timing (page's own performance API)
+scripts/cdp.mjs evalraw <target> <method> [json]  # raw CDP command passthrough
+scripts/cdp.mjs open    [url]                     # open new tab (triggers Allow prompt)
+scripts/cdp.mjs stop    [target]                  # stop daemon(s); run this when done debugging
+```
+
+`<target>` is a unique prefix of the targetId shown by `list`. `<reqId>` for `netcapture body`/`reqbody` is the short prefix shown in the REQ_ID column of `netcapture`.
+
+**`net` vs `netcapture`:** `net` is a one-shot read of the page's own `performance.getEntriesByType('resource')` — lightweight, instant, but only covers what the page can see (no in-flight, no bodies). `netcapture` is the full CDP `Network`-domain capture with request and response bodies on demand, and requires the daemon to have been active when the request fired.
 
 ## Why not chrome-devtools-mcp?
 
