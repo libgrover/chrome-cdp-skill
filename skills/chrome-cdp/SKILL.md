@@ -145,6 +145,10 @@ The daemon for a tab spawns on the first `console`/`netcapture` call against it.
 
 To capture a page-load round trip end-to-end: run `console <target>` (or `netcapture <target>`) once **before** the action you want to observe (or before reloading the page). The first call attaches the daemon; subsequent calls read from a buffer that started filling at attach time.
 
+### Cleanup when done
+
+When you finish debugging a tab, run `scripts/cdp.mjs stop <target>` to release that tab's daemon. `stop` with no argument terminates every daemon this CLI has spawned. Each daemon holds an open CDP WebSocket plus the per-tab ring buffers; leaving them running between tasks isn't catastrophic — they auto-exit after 20 minutes of inactivity — but explicitly stopping them frees the resources immediately and avoids leftover "this tab is being debugged" state if Chrome surfaces it elsewhere.
+
 ## Coordinates
 
 `shot` saves an image at native resolution: image pixels = CSS pixels × DPR. CDP Input events (`clickxy` etc.) take **CSS pixels**.
