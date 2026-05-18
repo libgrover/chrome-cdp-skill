@@ -59,7 +59,61 @@ function sockPath(targetId) {
     : resolve(RUNTIME_DIR, `cdp-${targetId}.sock`);
 }
 
-function getWsUrl() {
+/**
+ * Probe Chrome's CDP HTTP discovery endpoint to confirm the port file
+ * actually corresponds to a running browser with remote debugging enabled.
+ * `DevToolsActivePort` files are written on first launch and are NOT cleaned
+ * up when Chrome quits or when the user toggles remote debugging off mid-
+ * session — so the file existing is necessary but not sufficient.
+ *
+ * Resolves silently if the endpoint responds 200. Throws an actionable
+ * Error otherwise, mentioning the stale port file path and how to fix.
+ */
+async function probeCdpEndpoint(host, port, portFile) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 2000);
+  try {
+    const res = await fetch(`http://${host}:${port}/json/version`, {
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      throw new Error(
+        `Chrome's remote-debug endpoint on ${host}:${port} responded ${res.status}. ` +
+        `Toggle remote debugging at chrome://inspect/#remote-debugging.\n` +
+        `Port file: ${portFile}`
+      );
+    }
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error(
+        `Chrome's remote-debug endpoint on ${host}:${port} timed out after 2s.\n` +
+        `Port file may be stale: ${portFile}\n` +
+        `Toggle remote debugging at chrome://inspect/#remote-debugging.`
+      );
+    }
+    const code = err.cause?.code || err.code || '';
+    if (code === 'ECONNREFUSED' || /ECONNREFUSED/.test(err.message)) {
+      throw new Error(
+        `Chrome's remote-debug endpoint on ${host}:${port} is not listening.\n` +
+        `  This usually means:\n` +
+        `    • Chrome is closed, or\n` +
+        `    • Chrome was started without remote debugging, or\n` +
+        `    • Remote debugging was toggled off in chrome://inspect/#remote-debugging.\n` +
+        `  Stale port file: ${portFile}\n` +
+        `  Open Chrome and toggle remote debugging on, then retry.`
+      );
+    }
+    if (err.message?.startsWith("Chrome's remote-debug")) throw err;
+    throw new Error(
+      `Probe of Chrome's remote-debug endpoint at ${host}:${port} failed: ${err.message}\n` +
+      `Port file: ${portFile}`
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getWsUrl() {
   const home = homedir();
   // macOS: ~/Library/Application Support/<name>/DevToolsActivePort
   const macBrowsers = [
@@ -104,10 +158,17 @@ function getWsUrl() {
     }) : []),
   ].filter(Boolean);
   const portFile = candidates.find(p => existsSync(p));
-  if (!portFile) throw new Error('No DevToolsActivePort found. Enable remote debugging at chrome://inspect/#remote-debugging');
+  if (!portFile) {
+    throw new Error(
+      `No DevToolsActivePort found in any known Chrome profile location.\n` +
+      `  Enable remote debugging at chrome://inspect/#remote-debugging,\n` +
+      `  or set CDP_PORT_FILE to the path of your browser's DevToolsActivePort file.`
+    );
+  }
   const lines = readFileSync(portFile, 'utf8').trim().split('\n');
   if (lines.length < 2 || !lines[0] || !lines[1]) throw new Error(`Invalid DevToolsActivePort file: ${portFile}`);
   const host = process.env.CDP_HOST || '127.0.0.1';
+  await probeCdpEndpoint(host, lines[0], portFile);
   return `ws://${host}:${lines[0]}${lines[1]}`;
 }
 
@@ -1232,7 +1293,7 @@ async function runDaemon(targetId) {
 
   const cdp = new CDP();
   try {
-    await cdp.connect(getWsUrl());
+    await cdp.connect(await getWsUrl());
   } catch (e) {
     process.stderr.write(`Daemon: cannot connect to Chrome: ${e.message}\n`);
     process.exit(1);
@@ -1581,6 +1642,14 @@ async function getOrStartTabDaemon(targetId) {
   // Clean stale socket
   if (!IS_WINDOWS) try { unlinkSync(sp); } catch {}
 
+  // Pre-flight: confirm Chrome remote-debug is reachable before spawning
+  // the detached daemon. Daemons run with stdio: 'ignore', so an error
+  // thrown during their startup would otherwise be invisible — the CLI
+  // would only see "Daemon failed to start" after a 6s wait. Probing
+  // here lets us surface the real error (Chrome closed, debugging off,
+  // stale port file, etc.) immediately.
+  await getWsUrl();
+
   // Spawn daemon
   const child = spawn(process.execPath, [process.argv[1], '_daemon', targetId], {
     detached: true,
@@ -1773,7 +1842,7 @@ async function main() {
 
   if (cmd === 'list' || cmd === 'ls') {
     const cdp = new CDP();
-    await cdp.connect(getWsUrl());
+    await cdp.connect(await getWsUrl());
     const pages = await getPages(cdp);
     cdp.close();
     writeFileSync(PAGES_CACHE, JSON.stringify(pages), { mode: 0o600 });
@@ -1786,7 +1855,7 @@ async function main() {
   if (cmd === 'open') {
     const url = args[0] || 'about:blank';
     const cdp = new CDP();
-    await cdp.connect(getWsUrl());
+    await cdp.connect(await getWsUrl());
     const { targetId } = await cdp.send('Target.createTarget', { url });
     // Refresh cache; new tab may not appear in getTargets immediately, so add it manually
     const pages = await getPages(cdp);
