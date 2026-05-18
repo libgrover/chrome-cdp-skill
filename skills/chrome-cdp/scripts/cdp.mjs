@@ -1360,10 +1360,13 @@ async function runDaemon(targetId) {
     } catch {}
   }
 
-  // Top-frame setup. Best-effort — some target types (devtools://, chrome://)
-  // refuse one or more of these; we log nothing and let the relevant commands
-  // surface an empty buffer instead.
-  await enableCaptureOnSession(sessionId);
+  // CRITICAL: register every CDP event handler BEFORE enabling any domain.
+  // Chrome's `Runtime.enable` (and to a lesser extent `Log.enable`) replays
+  // pre-buffered console / log entries the moment it's called. If we enable
+  // first and listen second, the entire replay fires into a vacuum and we
+  // only capture events from that point forward. The daemon spawns on first
+  // contact with a tab, so missing the replay means missing everything the
+  // developer typed before they ran `cdp.mjs console <target>`.
 
   cdp.onEvent('Target.attachedToTarget', async (params) => {
     const childSid = params.sessionId;
@@ -1503,6 +1506,15 @@ async function runDaemon(targetId) {
     consoleBuf.markNavigation(url);
     netBuf.markNavigation(url);
   });
+
+  // Now that the listeners are wired, enable the domains. Runtime.enable
+  // replays the page's pre-buffered console messages — those fire through
+  // the consoleAPICalled handler above and end up in consoleBuf. If we
+  // enabled before listening, the replay would be silently dropped.
+  // Best-effort: some target types (devtools://, chrome://) refuse one or
+  // more enables; commands surface an empty buffer in that case rather
+  // than crashing the daemon.
+  await enableCaptureOnSession(sessionId);
 
   // Idle timer
   let idleTimer = setTimeout(shutdown, IDLE_TIMEOUT);
