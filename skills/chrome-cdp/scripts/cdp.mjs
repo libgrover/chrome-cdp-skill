@@ -70,15 +70,23 @@ function sockPath(targetId) {
  * Error otherwise, mentioning the stale port file path and how to fix.
  */
 async function probeCdpEndpoint(host, port, portFile) {
+  // Chrome's HTTP discovery applies DNS-rebinding protection: a request whose
+  // Host header is a raw IP literal (127.0.0.1, ::1) gets a 404, while a
+  // request with Host: localhost passes. Node's fetch forbids overriding the
+  // Host header directly, so we route the probe through `localhost` when the
+  // configured host is a loopback IP. The WebSocket session below still uses
+  // the original host, which is fine because WS Upgrade requests don't trip
+  // the same protection.
+  const probeHost = /^(?:127\.0\.0\.1|::1|\[::1\])$/.test(host) ? 'localhost' : host;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 2000);
   try {
-    const res = await fetch(`http://${host}:${port}/json/version`, {
+    const res = await fetch(`http://${probeHost}:${port}/json/version`, {
       signal: controller.signal,
     });
     if (!res.ok) {
       throw new Error(
-        `Chrome's remote-debug endpoint on ${host}:${port} responded ${res.status}. ` +
+        `Chrome's remote-debug endpoint on ${probeHost}:${port} responded ${res.status}. ` +
         `Toggle remote debugging at chrome://inspect/#remote-debugging.\n` +
         `Port file: ${portFile}`
       );
@@ -86,7 +94,7 @@ async function probeCdpEndpoint(host, port, portFile) {
   } catch (err) {
     if (err.name === 'AbortError') {
       throw new Error(
-        `Chrome's remote-debug endpoint on ${host}:${port} timed out after 2s.\n` +
+        `Chrome's remote-debug endpoint on ${probeHost}:${port} timed out after 2s.\n` +
         `Port file may be stale: ${portFile}\n` +
         `Toggle remote debugging at chrome://inspect/#remote-debugging.`
       );
@@ -94,7 +102,7 @@ async function probeCdpEndpoint(host, port, portFile) {
     const code = err.cause?.code || err.code || '';
     if (code === 'ECONNREFUSED' || /ECONNREFUSED/.test(err.message)) {
       throw new Error(
-        `Chrome's remote-debug endpoint on ${host}:${port} is not listening.\n` +
+        `Chrome's remote-debug endpoint on ${probeHost}:${port} is not listening.\n` +
         `  This usually means:\n` +
         `    • Chrome is closed, or\n` +
         `    • Chrome was started without remote debugging, or\n` +
@@ -105,7 +113,7 @@ async function probeCdpEndpoint(host, port, portFile) {
     }
     if (err.message?.startsWith("Chrome's remote-debug")) throw err;
     throw new Error(
-      `Probe of Chrome's remote-debug endpoint at ${host}:${port} failed: ${err.message}\n` +
+      `Probe of Chrome's remote-debug endpoint at ${probeHost}:${port} failed: ${err.message}\n` +
       `Port file: ${portFile}`
     );
   } finally {
