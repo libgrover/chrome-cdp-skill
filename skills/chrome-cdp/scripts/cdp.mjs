@@ -60,65 +60,63 @@ function sockPath(targetId) {
 }
 
 /**
- * Probe Chrome's CDP HTTP discovery endpoint to confirm the port file
- * actually corresponds to a running browser with remote debugging enabled.
- * `DevToolsActivePort` files are written on first launch and are NOT cleaned
- * up when Chrome quits or when the user toggles remote debugging off mid-
- * session — so the file existing is necessary but not sufficient.
+ * Probe the TCP port from the DevToolsActivePort file to confirm Chrome is
+ * actually running and accepting connections on that port.
  *
- * Resolves silently if the endpoint responds 200. Throws an actionable
- * Error otherwise, mentioning the stale port file path and how to fix.
+ * Why TCP, not HTTP /json/version: Chrome's HTTP discovery endpoints are
+ * only enabled when Chrome is launched with `--remote-debugging-port` on the
+ * command line; toggling remote debugging via chrome://inspect#remote-
+ * debugging brings up the WebSocket browser target but leaves /json/version
+ * (and friends) returning 404. The WebSocket endpoint we actually use works
+ * regardless of HTTP discovery state. A TCP-level connect tells us whether
+ * the port is listening, which is exactly what the WebSocket upgrade needs.
+ *
+ * Resolves silently on TCP connect success. Throws an actionable Error on
+ * ECONNREFUSED (Chrome closed / debugging off) or timeout (something hung
+ * on the port).
  */
 async function probeCdpEndpoint(host, port, portFile) {
-  // Chrome's HTTP discovery applies DNS-rebinding protection: a request whose
-  // Host header is a raw IP literal (127.0.0.1, ::1) gets a 404, while a
-  // request with Host: localhost passes. Node's fetch forbids overriding the
-  // Host header directly, so we route the probe through `localhost` when the
-  // configured host is a loopback IP. The WebSocket session below still uses
-  // the original host, which is fine because WS Upgrade requests don't trip
-  // the same protection.
-  const probeHost = /^(?:127\.0\.0\.1|::1|\[::1\])$/.test(host) ? 'localhost' : host;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 2000);
-  try {
-    const res = await fetch(`http://${probeHost}:${port}/json/version`, {
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      throw new Error(
-        `Chrome's remote-debug endpoint on ${probeHost}:${port} responded ${res.status}. ` +
-        `Toggle remote debugging at chrome://inspect/#remote-debugging.\n` +
-        `Port file: ${portFile}`
-      );
-    }
-  } catch (err) {
-    if (err.name === 'AbortError') {
-      throw new Error(
-        `Chrome's remote-debug endpoint on ${probeHost}:${port} timed out after 2s.\n` +
+  return new Promise((resolve, reject) => {
+    const sock = net.connect({ host, port: parseInt(port, 10) });
+    let settled = false;
+
+    const done = (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { sock.destroy(); } catch {}
+      if (err) reject(err);
+      else resolve();
+    };
+
+    const timer = setTimeout(() => {
+      done(new Error(
+        `Chrome's remote-debug port at ${host}:${port} did not respond within 2s.\n` +
         `Port file may be stale: ${portFile}\n` +
         `Toggle remote debugging at chrome://inspect/#remote-debugging.`
-      );
-    }
-    const code = err.cause?.code || err.code || '';
-    if (code === 'ECONNREFUSED' || /ECONNREFUSED/.test(err.message)) {
-      throw new Error(
-        `Chrome's remote-debug endpoint on ${probeHost}:${port} is not listening.\n` +
-        `  This usually means:\n` +
-        `    • Chrome is closed, or\n` +
-        `    • Chrome was started without remote debugging, or\n` +
-        `    • Remote debugging was toggled off in chrome://inspect/#remote-debugging.\n` +
-        `  Stale port file: ${portFile}\n` +
-        `  Open Chrome and toggle remote debugging on, then retry.`
-      );
-    }
-    if (err.message?.startsWith("Chrome's remote-debug")) throw err;
-    throw new Error(
-      `Probe of Chrome's remote-debug endpoint at ${probeHost}:${port} failed: ${err.message}\n` +
-      `Port file: ${portFile}`
-    );
-  } finally {
-    clearTimeout(timer);
-  }
+      ));
+    }, 2000);
+
+    sock.once('connect', () => done());
+    sock.once('error', (err) => {
+      if (err.code === 'ECONNREFUSED') {
+        done(new Error(
+          `Chrome's remote-debug port at ${host}:${port} is not listening.\n` +
+          `  This usually means:\n` +
+          `    • Chrome is closed, or\n` +
+          `    • Chrome was started without remote debugging, or\n` +
+          `    • Remote debugging was toggled off in chrome://inspect/#remote-debugging.\n` +
+          `  Stale port file: ${portFile}\n` +
+          `  Open Chrome and toggle remote debugging on, then retry.`
+        ));
+        return;
+      }
+      done(new Error(
+        `Could not reach Chrome's remote-debug port at ${host}:${port}: ${err.message}\n` +
+        `Port file: ${portFile}`
+      ));
+    });
+  });
 }
 
 async function getWsUrl() {
